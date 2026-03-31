@@ -63,7 +63,7 @@ File "C:\Users\Administrator\AppData\Local\Programs\Python\Python310\lib\zoneinf
 raise ZoneInfoNotFoundError(f"No time zone found with key {key}")
 zoneinfo._common.ZoneInfoNotFoundError: 'No time zone found with key Asia/Shanghai'
 
-解决：
+这是因为Python 3.10 在 Windows 上缺少时区数据的问题，解决：
 pip install tzdata
 
 
