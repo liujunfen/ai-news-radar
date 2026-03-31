@@ -44,6 +44,30 @@
 
 ### 4. 快速开始
 
+
+Windows
+```bash
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+python scripts/update_news.py --output-dir data --window-hours 24
+python -m http.server 8080
+```
+然后打开浏览器访问: http://localhost:8080
+
+python scripts/update_news.py --output-dir data --window-hours 24 提示以下：
+Traceback (most recent call last):
+File "E:\ai-news-radar\scripts\update_news.py", line 37, in <module>
+SH_TZ = ZoneInfo("Asia/Shanghai")
+File "C:\Users\Administrator\AppData\Local\Programs\Python\Python310\lib\zoneinfo\_common.py", line 24, in load_tzdata
+raise ZoneInfoNotFoundError(f"No time zone found with key {key}")
+zoneinfo._common.ZoneInfoNotFoundError: 'No time zone found with key Asia/Shanghai'
+
+解决：
+pip install tzdata
+
+
+
 ```bash
 cd /Users/carl/Downloads/10_项目代码/01_内容自动化与发布/ai-news-radar
 python3 -m venv .venv
