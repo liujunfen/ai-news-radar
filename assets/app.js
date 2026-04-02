@@ -10,7 +10,7 @@ const state = {
   siteFilter: "",
   query: "",
   mode: "ai",
-  waytoagiMode: "today",
+  waytoagiMode: "7d",
   waytoagiData: null,
   generatedAt: null,
 };
