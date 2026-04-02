@@ -374,6 +374,31 @@ def extract_waytoagi_history_url(root_html: str) -> str:
     return WAYTOAGI_HISTORY_FALLBACK
 
 
+def extract_all_mention_doc_urls(html: str) -> dict[str, str]:
+    """Extract all mention_doc title→URL mappings from raw Feishu HTML."""
+    results: dict[str, str] = {}
+    for pat in [
+        r'\{\\"id\\":\\"[^\"]+\\",\\"type\\":\\"mention_doc\\",\\"data\\":\{[^\}]+\}\}',
+        r'\{"id":"[^"]+","type":"mention_doc","data":\{[^}]+\}\}',
+    ]:
+        for raw in re.findall(pat, html):
+            if '\\"' in raw:
+                obj = decode_escaped_json(raw)
+            else:
+                try:
+                    obj = json.loads(raw)
+                except Exception:
+                    continue
+            if not obj:
+                continue
+            data = obj.get("data", {})
+            title = str(data.get("title") or "").strip()
+            raw_url = str(data.get("raw_url") or "").strip()
+            if title and raw_url:
+                results[title] = raw_url
+    return results
+
+
 def extract_feishu_client_vars(page_html: str) -> dict[str, Any]:
     marker = "window.DATA = Object.assign({}, window.DATA, { clientVars: Object("
     idx = page_html.find(marker)
@@ -430,6 +455,64 @@ def block_text(block_data: dict[str, Any]) -> str:
     return "".join(str(v) for k, v in sorted(initial.items(), key=lambda kv: key_int(kv[0]))).strip()
 
 
+def _extract_apool_inline_links(apool: dict[str, Any]) -> list[str]:
+    """Extract raw_url from inline-component mention_doc entries in apool.numToAttrib."""
+    urls: list[str] = []
+    num_to_attrib = apool.get("numToAttrib", {})
+    if not isinstance(num_to_attrib, dict):
+        return urls
+    for attr_list in num_to_attrib.values():
+        if not isinstance(attr_list, list) or len(attr_list) < 2:
+            continue
+        attr_type = str(attr_list[0])
+        if attr_type == "inline-component":
+            raw_str = str(attr_list[1])
+            # Parse the JSON string inside inline-component
+            try:
+                inner = json.loads(raw_str)
+            except Exception:
+                # Try unescaping
+                inner = decode_escaped_json(raw_str)
+            if not isinstance(inner, dict):
+                continue
+            data = inner.get("data", {})
+            if isinstance(data, dict):
+                url = str(data.get("raw_url") or data.get("url") or "").strip()
+                if url:
+                    urls.append(url)
+    return urls
+
+
+def block_text_and_link(block_data: dict[str, Any]) -> tuple[str, str]:
+    """Extract text and first link from a Feishu block. Returns (text, link)."""
+    text_obj = block_data.get("text", {}) if isinstance(block_data, dict) else {}
+
+    # First, try to extract link from apool.inline-component (Feishu native structure)
+    apool = text_obj.get("apool", {})
+    apool_urls = _extract_apool_inline_links(apool)
+    first_link = apool_urls[0] if apool_urls else ""
+
+    # Extract text from initialAttributedTexts
+    initial = text_obj.get("initialAttributedTexts", {}).get("text", {})
+    if not isinstance(initial, dict):
+        return "", first_link
+
+    def key_int(k: Any) -> int:
+        try:
+            return int(k)
+        except Exception:
+            return 0
+
+    parts: list[str] = []
+    for k, v in sorted(initial.items(), key=lambda kv: key_int(kv[0])):
+        if isinstance(v, dict):
+            parts.append(str(v.get("text", "")))
+        else:
+            parts.append(str(v))
+
+    return "".join(parts).strip(), first_link
+
+
 def clean_update_title(text: str) -> str:
     text = text.replace("《 》", "").replace("《》", "")
     return re.sub(r"\s+", " ", text).strip()
@@ -464,6 +547,7 @@ def extract_waytoagi_recent_updates_from_block_map(
     block_map: dict[str, Any],
     now_sh: datetime,
     page_url: str,
+    mention_urls: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     if not isinstance(block_map, dict) or not block_map:
         return []
@@ -539,14 +623,28 @@ def extract_waytoagi_recent_updates_from_block_map(
         day = nearest_heading_date(bid)
         if not day:
             continue
-        title = clean_update_title(block_text(bd))
+        title, item_link = block_text_and_link(bd)
+        title = clean_update_title(title)
         if not title:
             continue
         key = (day.isoformat(), title)
         if key in seen:
             continue
         seen.add(key)
-        updates.append({"date": day.isoformat(), "title": title, "url": page_url})
+
+        # Try to resolve the URL: embedded link > mention_doc match > page fallback
+        url: str = ""
+        if item_link.startswith("http"):
+            url = item_link
+        elif mention_urls:
+            for doc_title, doc_url in mention_urls.items():
+                if doc_title in title or title in doc_title:
+                    url = doc_url
+                    break
+        if not url:
+            url = page_url
+
+        updates.append({"date": day.isoformat(), "title": title, "url": url})
 
     return updates
 
@@ -555,18 +653,24 @@ def fetch_waytoagi_recent_7d(session: requests.Session, now_utc: datetime, root_
     now_sh = now_utc.astimezone(SH_TZ)
     root_html = session.get(root_url, timeout=30).text
     history_url = extract_waytoagi_history_url(root_html)
+    root_mention_urls = extract_all_mention_doc_urls(root_html)
 
     root_client_vars = extract_feishu_client_vars(root_html)
     root_block_map = root_client_vars.get("data", {}).get("block_map", {})
-    updates: list[dict[str, Any]] = extract_waytoagi_recent_updates_from_block_map(root_block_map, now_sh, root_url)
+    updates: list[dict[str, Any]] = extract_waytoagi_recent_updates_from_block_map(
+        root_block_map, now_sh, root_url, root_mention_urls
+    )
 
     if history_url and history_url != root_url:
         try:
             history_html = session.get(history_url, timeout=30).text
+            history_mention_urls = extract_all_mention_doc_urls(history_html)
             history_client_vars = extract_feishu_client_vars(history_html)
             history_block_map = history_client_vars.get("data", {}).get("block_map", {})
             updates.extend(
-                extract_waytoagi_recent_updates_from_block_map(history_block_map, now_sh, history_url)
+                extract_waytoagi_recent_updates_from_block_map(
+                    history_block_map, now_sh, history_url, history_mention_urls
+                )
             )
         except Exception:
             pass
